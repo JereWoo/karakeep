@@ -47,6 +47,24 @@ declare module "next-auth" {
   }
 }
 
+//fetch user profile info 
+
+const discoveryPromise = fetch(serverConfig.auth.oauth.wellKnownUrl).then(res => res.json());
+
+async function getUserInfo(tokens: any) {
+  const discovery = await discoveryPromise;
+  const userinfoEndpoint = discovery.userinfo_endpoint;
+  const response = await fetch(userinfoEndpoint, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${tokens.access_token}`,
+    },
+  });
+  return response.json();
+}
+
+
+
 /**
  * Returns true if the user table is empty, which indicates that this user is going to be
  * the first one. This can be racy if multiple users are created at the same time, but
@@ -117,21 +135,57 @@ if (oauth.wellKnownUrl) {
     httpOptions: {
       timeout: oauth.timeout,
     },
-    async profile(profile: Record<string, string>) {
+    profile: async (profile, tokens) => {
+      const userinfo = await getUserInfo(tokens);
+      const email = userinfo.email;
+      if (!email) {
+        throw new Error('Email is required but not provided by the provider');
+      }
+
       const [admin, firstUser] = await Promise.all([
-        isAdmin(profile.email),
+        isAdmin(email),
         isFirstUser(),
       ]);
+
+
+const getUserName = (userinfo: any, email: string): string => {
+  const nameFields = [
+    'name',
+    'nickname',
+    'preferred_username',
+    'username',
+    'preferred_name',
+    'full_name',
+    'display_name',
+  ];
+
+  // Try prioritized name fields
+  for (const field of nameFields) {
+    if (userinfo[field] && typeof userinfo[field] === 'string') {
+      return userinfo[field];
+    }
+  }
+
+  // Fallback to combining given_name and family_name
+  if (userinfo.given_name && userinfo.family_name) {
+    return `${userinfo.given_name} ${userinfo.family_name}`.trim();
+  }
+
+  // Fallback to email prefix
+  return email.split('@')[0] || 'Unknown';
+};
+
       return {
-        id: profile.sub,
-        name: profile.name || profile.email,
-        email: profile.email,
-        image: profile.picture,
+        id: userinfo.sub,
+        name: name,
+        email: email,
+        image: userinfo.picture,
         role: admin || firstUser ? "admin" : "user",
       };
     },
   });
 }
+
 
 export const authOptions: NextAuthOptions = {
   // https://github.com/nextauthjs/next-auth/issues/9493
@@ -157,7 +211,7 @@ export const authOptions: NextAuthOptions = {
         return true;
       }
       if (!profile?.email) {
-        throw new Error("No profile");
+        throw new Error("Profile email missing");
       }
       const [{ count: userCount }] = await db
         .select({ count: count() })
